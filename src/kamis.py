@@ -1,20 +1,46 @@
-"""
+﻿"""
 src/kamis.py — KAMIS Open API 로 한국 농수산물 도·소매가격 수집
-
-이 모듈을 쓰려면 .env 에 KAMIS_CERT_KEY, KAMIS_CERT_ID 가 있어야 합니다.
-사용 액션: periodProductList (일별 품목별 도·소매가격, 기간 지정)
 """
+import ssl
 import pandas as pd
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 import config
-from src.utils import get_json
+
+
+class _KamisTLSAdapter(HTTPAdapter):
+    """KAMIS 서버의 구형 SSL 설정에 맞춰 연결."""
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+
+def get_json(url: str, params: dict) -> dict:
+    """KAMIS 전용 SSL 어댑터로 JSON API 호출."""
+    session = requests.Session()
+    session.mount("https://", _KamisTLSAdapter())
+    last_err = None
+    for attempt in range(1, config.HTTP_RETRIES + 1):
+        try:
+            r = session.get(url, params=params, timeout=config.HTTP_TIMEOUT, verify=False)
+            r.raise_for_status()
+            return r.json()
+        except (requests.RequestException, ValueError) as e:
+            last_err = e
+    raise RuntimeError(f"API 호출 실패: {url}\n{last_err}")
 
 
 def _fetch_one_item(item: dict, start: str, end: str) -> pd.DataFrame:
     """단일 품목의 기간별 가격을 받아온다."""
     params = {
         "action": "periodProductList",
-        "p_productclscode": config.KAMIS_PRODUCT_CLS,   # 01 소매 / 02 도매
+        "p_productclscode": config.KAMIS_PRODUCT_CLS,
         "p_startday": start,
         "p_endday": end,
         "p_itemcategorycode": item["category"],
@@ -28,55 +54,48 @@ def _fetch_one_item(item: dict, start: str, end: str) -> pd.DataFrame:
     }
     data = get_json(config.KAMIS_BASE_URL, params)
 
-    # 응답 구조가 버전에 따라 다를 수 있어 방어적으로 파싱.
     rows = []
-    payload = data.get("data", data)
-    items = payload.get("item", []) if isinstance(payload, dict) else payload
+    payload = data.get("data", {})
+    items = payload.get("item", []) if isinstance(payload, dict) else []
     if isinstance(items, dict):
         items = [items]
     for row in items or []:
-        # 대표 필드: regday(날짜), price(가격). 키 이름은 명세서 기준 조정.
-        rows.append(
-            {
-                "name": item["name"],
-                "regday": row.get("regday") or row.get("yyyy"),
-                "price": row.get("price"),
-            }
-        )
-    df = pd.DataFrame(rows)
-    return df
+        if not isinstance(row, dict):
+            continue
+        yyyy = row.get("yyyy")
+        regday = row.get("regday")
+        price = row.get("price")
+        if row.get("countyname") not in (None, "평균"):
+            continue
+        if not yyyy or not regday or price in (None, "-", ""):
+            continue
+        mm, dd = regday.split("/")
+        date_str = f"{yyyy}-{mm}-{dd}"
+        rows.append({"name": item["name"], "date": date_str, "price": price})
+    return pd.DataFrame(rows)
 
 
 def fetch_prices(start: str = None, end: str = None) -> pd.DataFrame:
-    """config.KAMIS_ITEMS 의 모든 품목 가격을 수집해 합친다.
-
-    반환: name, date, price
-    """
+    """config.KAMIS_ITEMS 의 모든 품목 가격을 수집해 합친다."""
     if not config.KAMIS_CERT_KEY or not config.KAMIS_CERT_ID:
-        raise RuntimeError(
-            "KAMIS 인증 정보가 없습니다. .env 에 KAMIS_CERT_KEY / KAMIS_CERT_ID 를 넣으세요."
-        )
+        raise RuntimeError("KAMIS 인증 정보가 없습니다. .env 를 확인하세요.")
     if not config.KAMIS_ITEMS:
-        raise RuntimeError(
-            "config.KAMIS_ITEMS 가 비어 있습니다. 분석할 품목 코드를 채워주세요."
-        )
+        raise RuntimeError("config.KAMIS_ITEMS 가 비어 있습니다.")
 
     start = start or config.START_DATE
     end = end or config.END_DATE
 
     frames = []
     for item in config.KAMIS_ITEMS:
-        print(f"  [kamis] {item['name']} 수집 중...")
-        df = _fetch_one_item(item, start, end)
-        frames.append(df)
+        print("  [kamis] " + item["name"] + " 수집 중...")
+        frames.append(_fetch_one_item(item, start, end))
 
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not out.empty:
-        # 가격 문자열에서 콤마 제거 후 숫자화, 날짜 파싱
-        out["price"] = (
-            out["price"].astype(str).str.replace(",", "", regex=False)
-        )
+        out["price"] = out["price"].astype(str).str.replace(",", "", regex=False)
         out["price"] = pd.to_numeric(out["price"], errors="coerce")
-        out["date"] = pd.to_datetime(out["regday"], errors="coerce")
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
         out = out.dropna(subset=["date", "price"])[["name", "date", "price"]]
     return out.reset_index(drop=True)
+
+

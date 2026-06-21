@@ -57,7 +57,7 @@ WORLDBANK_PINKSHEET_FALLBACK = (
 # ---------------------------------------------------------------------------
 # 1) kamis.or.kr 회원가입 → 고객센터 > Open-API > 이용신청 으로 키 발급
 # 2) 발급받은 값을 .env 에 KAMIS_CERT_KEY / KAMIS_CERT_ID 로 저장
-KAMIS_BASE_URL = "http://www.kamis.or.kr/service/price/xml.do"
+KAMIS_BASE_URL = "https://www.kamis.or.kr/service/price/xml.do"
 KAMIS_CERT_KEY = os.getenv("KAMIS_CERT_KEY", "")
 KAMIS_CERT_ID = os.getenv("KAMIS_CERT_ID", "")
 
@@ -66,9 +66,9 @@ KAMIS_CERT_ID = os.getenv("KAMIS_CERT_ID", "")
 # item_code / kind_code 는 KAMIS Open-API 명세의 코드표를 보고 채우세요.
 # (아래는 예시 — 실제 코드는 발급 후 명세서에서 확인)
 KAMIS_ITEMS = [
-    # {"name": "배추", "category": "200", "item": "211", "kind": "01"},
-    # {"name": "마늘", "category": "200", "item": "258", "kind": "00"},
-    # {"name": "사과", "category": "400", "item": "411", "kind": "05"},
+    {"name": "배추(가을)", "category": "200", "item": "211", "kind": "03"},
+    {"name": "건고추(화건)", "category": "200", "item": "241", "kind": "00"},
+    {"name": "깐마늘(국산)", "category": "200", "item": "258", "kind": "01"},
 ]
 
 # 도·소매 구분: 01 소매, 02 도매
