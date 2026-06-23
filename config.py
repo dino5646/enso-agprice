@@ -31,13 +31,16 @@ KAMIS_BASE_URL = "https://www.kamis.or.kr/service/price/xml.do"
 KAMIS_CERT_KEY = os.getenv("KAMIS_CERT_KEY", "")
 KAMIS_CERT_ID = os.getenv("KAMIS_CERT_ID", "")
 
-# category 200 = vegetables. 배추 4계절 + 건고추
+# 200=vegetables, 600=seafood
 KAMIS_ITEMS = [
     {"name": "cabbage_spring", "category": "200", "item": "211", "kind": "01"},
     {"name": "cabbage_summer", "category": "200", "item": "211", "kind": "02"},
     {"name": "cabbage_fall", "category": "200", "item": "211", "kind": "03"},
     {"name": "cabbage_winter", "category": "200", "item": "211", "kind": "06"},
     {"name": "Dried_chili", "category": "200", "item": "241", "kind": "00"},
+    {"name": "mackerel", "category": "600", "item": "611", "kind": "01"},
+    {"name": "squid", "category": "600", "item": "619", "kind": "01"},
+    {"name": "hairtail", "category": "600", "item": "613", "kind": "01"},
 ]
 
 KAMIS_PRODUCT_CLS = "02"
