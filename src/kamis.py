@@ -1,7 +1,9 @@
 ﻿"""
-src/kamis.py — KAMIS Open API 로 한국 농수산물 도·소매가격 수집
+src/kamis.py — KAMIS 월별 도·소매가격 수집 (monthlySalesList)
+연도별 m1~m12 구조를 (name, date, price) 행으로 펼침.
 """
 import ssl
+import time
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
@@ -11,7 +13,6 @@ import config
 
 
 class _KamisTLSAdapter(HTTPAdapter):
-    """KAMIS 서버의 구형 SSL 설정에 맞춰 연결."""
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context()
         ctx.check_hostname = False
@@ -21,62 +22,70 @@ class _KamisTLSAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 
-def get_json(url: str, params: dict) -> dict:
-    """KAMIS 전용 SSL 어댑터로 JSON API 호출."""
-    session = requests.Session()
-    session.mount("https://", _KamisTLSAdapter())
+_SESSION = requests.Session()
+_SESSION.mount("https://", _KamisTLSAdapter())
+
+
+def get_json(url, params):
     last_err = None
-    for attempt in range(1, config.HTTP_RETRIES + 1):
+    for _ in range(config.HTTP_RETRIES):
         try:
-            r = session.get(url, params=params, timeout=config.HTTP_TIMEOUT, verify=False)
+            r = _SESSION.get(url, params=params, timeout=config.HTTP_TIMEOUT, verify=False)
             r.raise_for_status()
             return r.json()
         except (requests.RequestException, ValueError) as e:
             last_err = e
+            time.sleep(1)
     raise RuntimeError(f"API 호출 실패: {url}\n{last_err}")
 
 
-def _fetch_one_item(item: dict, start: str, end: str) -> pd.DataFrame:
-    """단일 품목의 기간별 가격을 받아온다."""
+def _parse_monthly(data, name, want_cls):
+    """price[].item[] 의 연도별 m1~m12 를 (name, date, price) 로 펼침."""
+    rows = []
+    blocks = data.get("price", [])
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    for block in blocks or []:
+        if block.get("productclscode") != want_cls:
+            continue
+        items = block.get("item", [])
+        if isinstance(items, dict):
+            items = [items]
+        for it in items:
+            yyyy = it.get("yyyy")
+            if not yyyy or not str(yyyy).isdigit():
+                continue
+            for mm in range(1, 13):
+                val = it.get(f"m{mm}")
+                if val in (None, "-", ""):
+                    continue
+                rows.append({
+                    "name": name,
+                    "date": f"{yyyy}-{mm:02d}-01",
+                    "price": val,
+                })
+    return rows
+
+
+def _fetch_item(item, end_year, period):
     params = {
-        "action": "periodProductList",
-        "p_productclscode": config.KAMIS_PRODUCT_CLS,
-        "p_startday": start,
-        "p_endday": end,
+        "action": "monthlySalesList",
+        "p_yyyy": str(end_year),
+        "p_period": str(period),
         "p_itemcategorycode": item["category"],
         "p_itemcode": item["item"],
         "p_kindcode": item["kind"],
-        "p_productrankcode": config.KAMIS_PRODUCT_RANK,
+        "p_graderank": config.KAMIS_GRADE_RANK,
         "p_convert_kg_yn": "N",
         "p_cert_key": config.KAMIS_CERT_KEY,
         "p_cert_id": config.KAMIS_CERT_ID,
         "p_returntype": "json",
     }
     data = get_json(config.KAMIS_BASE_URL, params)
-
-    rows = []
-    payload = data.get("data", {})
-    items = payload.get("item", []) if isinstance(payload, dict) else []
-    if isinstance(items, dict):
-        items = [items]
-    for row in items or []:
-        if not isinstance(row, dict):
-            continue
-        yyyy = row.get("yyyy")
-        regday = row.get("regday")
-        price = row.get("price")
-        if row.get("countyname") not in (None, "평균"):
-            continue
-        if not yyyy or not regday or price in (None, "-", ""):
-            continue
-        mm, dd = regday.split("/")
-        date_str = f"{yyyy}-{mm}-{dd}"
-        rows.append({"name": item["name"], "date": date_str, "price": price})
-    return pd.DataFrame(rows)
+    return _parse_monthly(data, item["name"], config.KAMIS_PRODUCT_CLS)
 
 
-def fetch_prices(start: str = None, end: str = None) -> pd.DataFrame:
-    """config.KAMIS_ITEMS 의 모든 품목 가격을 수집해 합친다."""
+def fetch_prices(start=None, end=None):
     if not config.KAMIS_CERT_KEY or not config.KAMIS_CERT_ID:
         raise RuntimeError("KAMIS 인증 정보가 없습니다. .env 를 확인하세요.")
     if not config.KAMIS_ITEMS:
@@ -84,18 +93,24 @@ def fetch_prices(start: str = None, end: str = None) -> pd.DataFrame:
 
     start = start or config.START_DATE
     end = end or config.END_DATE
+    start_year = int(start[:4])
+    end_year = int(end[:4])
+    period = end_year - start_year + 1   # 한 번에 받을 연수
 
-    frames = []
+    all_rows = []
     for item in config.KAMIS_ITEMS:
-        print("  [kamis] " + item["name"] + " 수집 중...")
-        frames.append(_fetch_one_item(item, start, end))
+        print(f"  [kamis] {item['name']} 수집 중...", end="", flush=True)
+        rows = _fetch_item(item, end_year, period)
+        all_rows.extend(rows)
+        print(f" {len(rows)}건")
 
-    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    out = pd.DataFrame(all_rows)
     if not out.empty:
         out["price"] = out["price"].astype(str).str.replace(",", "", regex=False)
         out["price"] = pd.to_numeric(out["price"], errors="coerce")
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.dropna(subset=["date", "price"])[["name", "date", "price"]]
+        out = out.dropna(subset=["date", "price"])
+        out = out[(out["date"] >= start) & (out["date"] <= end)]
+        out = out.drop_duplicates(subset=["name", "date"]).sort_values(["name", "date"])
+        out = out[["name", "date", "price"]]
     return out.reset_index(drop=True)
-
-
